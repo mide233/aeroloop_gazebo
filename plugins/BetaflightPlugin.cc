@@ -649,7 +649,7 @@ void BetaflightPluginPrivate::ReceiveMotorCommand()
   {
     // increase timeout for receive once we detect a packet from
     // Betaflight FCS.
-    waitMs = 1000;
+    waitMs = 2;
   }
   else
   {
@@ -722,19 +722,35 @@ void BetaflightPluginPrivate::SendState(EntityComponentManager &_ecm) const
   // Note: We're using the last update time since we don't have direct access to UpdateInfo here
   pkt.timestamp = std::chrono::duration<double>(this->lastControllerUpdateTime).count();
 
-  // Get IMU linear acceleration
+  // Get IMU linear acceleration. Gazebo reports the kinematic acceleration of
+  // the link in the world frame and excludes gravity, but a real accelerometer
+  // measures specific force (a - g) in the body frame. Without this the flight
+  // controller sees 0 g at rest, so its estimator integrates a permanent
+  // -9.81 m/s^2 vertical bias and the altitude estimate is unusable.
   auto accelComp = _ecm.Component<components::LinearAcceleration>(this->imuEntity);
   if (!accelComp)
   {
     gzerr << "Unable to get IMU linear acceleration\n";
     return;
   }
-  gz::math::Vector3d linearAccel = accelComp->Data();
+  auto imuPoseComp = _ecm.Component<components::Pose>(this->imuEntity);
+  if (!imuPoseComp)
+  {
+    gzerr << "Unable to get IMU pose\n";
+    return;
+  }
 
-  // copy to pkt
-  pkt.imuLinearAccelerationXYZ[0] = linearAccel.X();
-  pkt.imuLinearAccelerationXYZ[1] = linearAccel.Y();
-  pkt.imuLinearAccelerationXYZ[2] = linearAccel.Z();
+  // World frame is ENU (z up), so gravity points along -z.
+  const gz::math::Vector3d specificWorld =
+      accelComp->Data() + gz::math::Vector3d(0, 0, 9.81);
+  // Body frame is FLU, which matches the FC's NWU convention (the SITL bridge
+  // negates the packet, and Betaflight maps the result straight back).
+  const gz::math::Vector3d specificBody =
+      imuPoseComp->Data().Rot().RotateVectorReverse(specificWorld);
+
+  pkt.imuLinearAccelerationXYZ[0] = specificBody.X();
+  pkt.imuLinearAccelerationXYZ[1] = specificBody.Y();
+  pkt.imuLinearAccelerationXYZ[2] = specificBody.Z();
 
   // Get IMU angular velocity
   auto angularVelComp = _ecm.Component<components::AngularVelocity>(this->imuEntity);
